@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EmulatorJS</title>
+<meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%;
+    background:#000;
+    overflow:hidden;
+  }
+
+  /* Loading / idle screen */
+  #idle-screen {
+    position:fixed; inset:0; z-index:100;
+    background:#000;
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    gap:14px;
+    font-family:'Press Start 2P', monospace;
+    transition:opacity .4s;
+  }
+  #idle-screen.hidden { opacity:0; pointer-events:none; }
+
+  .idle-logo {
+    font-size:clamp(9px,2.5vw,13px);
+    color:#ffcc00;
+    text-shadow:0 0 10px #ffaa00, 0 0 24px #ff880055;
+    text-align:center;
+    letter-spacing:3px;
+    animation:flic 6s infinite;
+  }
+  @keyframes flic{0%,19%,21%,51%,53%,100%{opacity:1}20%,52%{opacity:.4}}
+
+  .idle-game-name {
+    font-size:clamp(7px,2vw,10px);
+    color:#fff;
+    text-align:center;
+    letter-spacing:2px;
+    max-width:90%;
+    line-height:1.8;
+  }
+  .idle-console {
+    font-size:clamp(5px,1.5vw,7px);
+    color:rgba(255,204,0,.55);
+    letter-spacing:2px;
+  }
+
+  .idle-bar-wrap {
+    width:200px; max-width:80%;
+    height:8px; background:#111;
+    border:1px solid #333;
+  }
+  .idle-bar {
+    height:100%; width:0%;
+    background:linear-gradient(90deg,#ffaa00,#ffcc00);
+    box-shadow:0 0 6px #ffaa00;
+    transition:width .2s;
+  }
+  .idle-status {
+    font-size:clamp(5px,1.5vw,7px);
+    color:rgba(255,255,255,.35);
+    letter-spacing:1px;
+    animation:blink .9s infinite;
+  }
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+
+  .idle-scanlines {
+    position:fixed; inset:0; pointer-events:none; z-index:101;
+    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.22) 2px,rgba(0,0,0,.22) 4px);
+  }
+
+  .idle-vignette {
+    position:fixed; inset:0; pointer-events:none; z-index:102;
+    background:radial-gradient(ellipse at 50% 50%, transparent 55%, rgba(0,0,0,.7) 100%);
+  }
+
+  /* No-game screen */
+  #no-game {
+    position:fixed; inset:0;
+    background:#000;
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    gap:10px; padding:20px;
+    font-family:'Press Start 2P', monospace;
+    display:none;
+  }
+  .nogame-txt {
+    font-size:clamp(7px,2vw,9px);
+    color:#ff2d78;
+    text-align:center;
+    line-height:2;
+  }
+  .nogame-sub {
+    font-size:clamp(5px,1.5vw,7px);
+    color:rgba(255,255,255,.35);
+    text-align:center;
+    letter-spacing:1px;
+  }
+
+  /* The emulator container */
+  #game {
+    width:100%; height:100%;
+    position:absolute; inset:0;
+  }
+</style>
+</head>
+<body>
+
+<!-- Idle / loading screen shown before game starts -->
+<div id="idle-screen">
+  <div class="idle-logo">GOLD ARCADE</div>
+  <div class="idle-game-name" id="idle-name">LOADING...</div>
+  <div class="idle-console" id="idle-console"></div>
+  <div class="idle-bar-wrap"><div class="idle-bar" id="idle-bar"></div></div>
+  <div class="idle-status" id="idle-status">INITIALIZING...</div>
+  <div class="idle-scanlines"></div>
+  <div class="idle-vignette"></div>
+</div>
+
+<!-- No game selected screen -->
+<div id="no-game">
+  <div class="nogame-txt">NO GAME<br>SELECTED</div>
+  <div class="nogame-sub">SELECT A GAME FROM<br>THE ARCADE CABINET</div>
+</div>
+
+<!-- EmulatorJS mounts here -->
+<div id="game"></div>
+
+<script>
+/*
+  This page is loaded inside an iframe by the main site.
+  It receives game info via URL params:
+    ?rom=/roms/mario.nes&core=nes&name=Super+Mario+Bros.&console=NES
+
+  HOW TO USE:
+  - Put your ROM files in a /roms/ folder on your server
+  - The main site passes the ROM path, core name, and display info
+  - EmulatorJS handles everything else
+
+  CORE NAMES (EJS_core value):
+    NES    → nes
+    SNES   → snes
+    GBA    → gba
+    GBC    → gbc
+    GB     → gb
+    N64    → n64
+    PSX    → psx
+    SEGA   → segaMD (Mega Drive / Genesis)
+    MAME   → mame2003
+    ARCADE → mame2003
+*/
+
+  var params  = new URLSearchParams(window.location.search);
+  var romUrl  = params.get('rom');
+  var core    = params.get('core');
+  var name    = params.get('name')    || 'Unknown Game';
+  var console_= params.get('console') || '';
+
+  document.getElementById('idle-name').textContent    = name.toUpperCase();
+  document.getElementById('idle-console').textContent = console_.toUpperCase();
+
+  if (!romUrl || !core) {
+    document.getElementById('idle-screen').style.display = 'none';
+    document.getElementById('no-game').style.display     = 'flex';
+  } else {
+    /* Fake progress bar for the loading feel */
+    var prog = 0;
+    var statuses = ['INITIALIZING...','LOADING ROM...','STARTING CORE...','READY!'];
+    var si = 0;
+    var ticker = setInterval(function() {
+      prog = Math.min(prog + (Math.random() * 8 + 2), 95);
+      document.getElementById('idle-bar').style.width = prog + '%';
+      si = Math.min(Math.floor(prog / 25), statuses.length - 1);
+      document.getElementById('idle-status').textContent = statuses[si];
+    }, 120);
+
+    /* EmulatorJS config */
+    window.EJS_player        = '#game';
+    window.EJS_core          = core;
+    window.EJS_gameUrl       = romUrl;
+    window.EJS_pathtodata    = 'https://cdn.emulatorjs.org/stable/data/';
+    window.EJS_startOnLoaded = true;
+    window.EJS_color          = '#ffcc00'; /* golden UI color */
+    window.EJS_backgroundColor = '#000000';
+    window.EJS_backgroundImage = '';
+    window.EJS_defaultControls  = 1;
+    window.EJS_Buttons = {
+      playPause:   true,
+      restart:     true,
+      mute:        true,
+      settings:    true,
+      fullscreen:  true,
+      saveState:   true,
+      loadState:   true,
+      screenRecord:false,
+      gamepad:     true,
+      cheat:       false,
+      volume:      true,
+      saveSavFiles:true,
+    };
+
+    /* Hide loading screen once emulator fires ready */
+    window.EJS_onGameStart = function() {
+      clearInterval(ticker);
+      document.getElementById('idle-bar').style.width = '100%';
+      document.getElementById('idle-status').textContent = 'GO!';
+      setTimeout(function() {
+        var s = document.getElementById('idle-screen');
+        s.classList.add('hidden');
+        setTimeout(function(){ s.style.display = 'none'; }, 400);
+      }, 400);
+    };
+
+    /* Load EmulatorJS */
+    var script = document.createElement('script');
+    script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
+    document.body.appendChild(script);
+  }
+</script>
+</body>
+</html>
